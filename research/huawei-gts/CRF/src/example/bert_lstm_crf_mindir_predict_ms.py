@@ -14,9 +14,10 @@ from utils.metrics import get_metric
 
 if __name__ == '__main__':
     # Step1： 定义初始化参数
+    batch_size = config.batch_size
 
-    # Step2: 通过mindir加载模型
-    file_name = 'lstm_crf.mindir'
+    # Step2: 通过mindir加载模型，这里可以传入路径
+    file_name = 'bert_lstm_crf.mindir'
     graph = ms.load(file_name)
     model = nn.GraphCell(graph)
     print(model)

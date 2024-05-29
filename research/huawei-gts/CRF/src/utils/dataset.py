@@ -1,9 +1,14 @@
 """dataset util"""
-
+import os
+import random
+import numpy as np
+import torch
+import mindspore
 import mindspore.dataset as ds
+from .config import config
 
-Max_Len = 113
-batch_size = 16
+Max_Len = config.vocab_max_length
+batch_size = config.batch_size
 UNK = "<UNK>"
 PAD = "<PAD>"
 NUM = "<NUM>"
@@ -11,10 +16,7 @@ NUM = "<NUM>"
 # BIOES标注模式： 一般一共分为四大类：PER（人名），LOC（位置[地名]），ORG（组织）以及MISC(杂项)，而且B表示开始，I表示中间，O表示不是实体。
 Entity = ['PER', 'LOC', 'ORG', 'MISC']
 labels_text_mp = {k: v for k, v in enumerate(Entity)}
-LABEL_MAP = {'O': 0}  # 非实体
-for i, e in enumerate(Entity):
-    LABEL_MAP[f'B-{e}'] = 2 * (i + 1) - 1  # 实体首字
-    LABEL_MAP[f'I-{e}'] = 2 * (i + 1)  # 实体非首字
+LABEL_MAP = {'O': 0, 'B-PER': 1, 'I-PER': 2, 'B-LOC': 3, 'I-LOC': 4, 'B-ORG': 5, 'I-ORG': 6, 'B-MISC': 7, 'I-MISC': 8}
 
 COLUMN_NAME = ["data", "length", "label"]
 
@@ -117,6 +119,20 @@ def read_data(path):
 
     return sentences, labels
 
+def seed_everything(seed):
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    np.random.seed(seed)
+    mindspore.set_seed(seed)
+    mindspore.dataset.config.set_seed(seed)
+
+
+def parse_dataset(data, id_indexs, shuffle=False):
+    dataset_generator = GetDatasetGenerator(data, id_indexs)
+    dataset_ds = ds.GeneratorDataset(
+        dataset_generator, COLUMN_NAME, shuffle=shuffle)
+    train_dataset_batch = dataset_ds.batch(batch_size, drop_remainder=True)
+    return train_dataset_batch
 
 if __name__ == '__main__':
     train = read_data('../../conll2003/train.txt')
@@ -143,3 +159,21 @@ if __name__ == '__main__':
     for item in dataset_test:
         print(item[0].shape)
         break
+
+def pad(batch):
+    '''Pads to the longest sample'''
+    print(batch)
+    f = lambda x: [sample[x] for sample in batch]
+    words = f(0)
+    labels = f(2)
+    seqlens = f(1)
+    maxlen = np.array(seqlens).max()
+
+    f = lambda x, seqlen: [sample[x] + [0] * (seqlen - len(sample[x])) for sample in batch] # 0: <pad>
+    x = f(0, maxlen)
+    y = f(2, maxlen)
+
+
+    f = torch.LongTensor
+
+    return words, f(x), f(y), seqlens

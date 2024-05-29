@@ -1,13 +1,8 @@
-import sys
-from pathlib import Path
-
-sys.path.append(f'{Path.cwd()}')
-print(f'======CurrentPath: {Path.cwd()}')
 import mindspore as ms
 
 # 设置mindspore的执行目标，可以使Ascend、CPU、GPU，mode建议位图模式。注意，ms需要放到import的首行，避免context设置不生效
-ms.set_context(device_target="CPU", mode=ms.GRAPH_MODE)
-from model.lstm_crf_model import CRF
+ms.set_context(device_target="Ascend", mode=ms.GRAPH_MODE)
+from model.lstm_crf_model import CRF, post_decode
 import mindspore.numpy as mnp
 
 if __name__ == '__main__':
@@ -22,5 +17,5 @@ if __name__ == '__main__':
     batch_size = 2
     emissions = mnp.randn(seq_length, batch_size, len(tag_to_idx))
     score, history = model(emissions)
-    best_tags_list = CRF.post_decode(score, history, mnp.full(batch_size, 1))
+    best_tags_list = post_decode(score, history, mnp.full(batch_size, 1))
     print(best_tags_list)

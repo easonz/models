@@ -1,13 +1,7 @@
-import sys
-from pathlib import Path
-
-sys.path.append(f'{Path.cwd()}')
-print(f'======CurrentPath: {Path.cwd()}')
-
 import mindspore as ms
 
 # 设置mindspore的执行目标，可以使Ascend、CPU、GPU，mode建议位图模式。注意，ms需要放到import的首行，避免context设置不生效
-ms.set_context(device_target="CPU", mode=ms.GRAPH_MODE)
+ms.set_context(device_target="Ascend", mode=ms.GRAPH_MODE)
 
 from model.lstm_crf_model import CRF
 
