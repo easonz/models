@@ -171,6 +171,7 @@ def parse_args():
     parser.add_argument('--checkpoint', help='checkpoint file')
     parser.add_argument('--dataroot', help='coco data root')
     parser.add_argument('--out', help='output result file')
+    parser.add_argument('--resume', help='when core store, resume from last record', default=0)
     parser.add_argument(
         '--json_out',
         help='output result file name without extension',
