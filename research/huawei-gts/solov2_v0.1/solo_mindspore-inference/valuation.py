@@ -134,7 +134,7 @@ def build_dataset(cfg,cfg_data):
     img_prefix = cfg['img_prefix']
 
     is_training = False
-    cocodataset = CocoDataset(ann_file=ann_file, data_root=None, img_prefix=img_prefix, test_mode=False)
+    cocodataset = CocoDataset(ann_file=ann_file, data_root=None, img_prefix=img_prefix, test_mode=True)
     dataset_column_names = ['res']
     import mindspore.dataset as de
     ds = de.GeneratorDataset(cocodataset, column_names=dataset_column_names,
@@ -150,7 +150,7 @@ def build_dataset(cfg,cfg_data):
             Normalize(mean=[123.675, 116.28, 103.53], 
             std=[58.395, 57.12, 57.375], 
             to_rgb=True),
-            Pad(size=(1344,1344)), 
+            Pad(size_divisor=32),
             ImageToTensor(keys=['img']),
             Collect(keys=['img'])], 
             img_scale=(1333, 800),
@@ -263,56 +263,72 @@ def main():
     dataset_test = build_dataset(config.data.test,config.data)
     logging.debug("build val dataset success")
 
-    #data_iter = dataset_val.create_dict_iterator()
-    # multiScaleFlipAug = MultiScaleFlipAug(transforms=[ResizeOperation(keep_ratio=True), RandomFlipOperation(), Normalize(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True),
-    # Pad(size_divisor=32), ImageToTensor(keys=['img'])], img_scale=(1333, 800))
-    # trans_vals = [multiScaleFlipAug]
 
-    results = []
-    prog_bar = mmcv.ProgressBar(len(dataset_test))
-    if arg.mode:
-        for i, data in enumerate(dataset_test):
-            # logging.info(f"data:{data}")
-            data = data[0]
-            # breakpoint()
-            # data['img'] = data['img'][0]
-            # logging.info(f'img.shape{img.shape}')
-            data['img_meta'][0] = data['img_meta'][0].data[0]
-            seg_result = model(return_loss=False, rescale=True, **data)
-            result = get_masks(seg_result, num_classes=num_classes)
-            results.append(result)
+    if arg.resume:
+        results = []
+        resume = 0
+
+        if os.path.exists("valution_results.pkl"):
+            with open("valution_results.pkl", "rb") as fd:
+                logging.info("read valution_results.pkl")
+                results = pickle.load(fd)
+                logging.info(f"resume from {len(results)}")
+                resume = len(results)
+        prog_bar = mmcv.ProgressBar(len(dataset_test))
+        for i in range(len(results)):
             prog_bar.update()
 
+        try:
+            if arg.mode:
+                for i, data in enumerate(dataset_test):
+                    if i < resume:
+                        continue
+                    data = data[0]
+                    data['img_meta'][0] = data['img_meta'][0].data[0]
+                    seg_result = model(return_loss=False, rescale=True, **data)
+                    result = get_masks(seg_result, num_classes=num_classes)
+                    results.append(result)
+                    prog_bar.update()
+        except:
+            with open("valution_results.pkl", "wb") as fd:
+                logging.info(f"writing valuation_results.pkil, results:{len(results)}")
+                pickle.dump(results, fd)
+                return
     else:
-        for i, data in enumerate(dataset_test):
-            # logging.info(f"data:{data}")
-            data = data[0]
-            img = data['img'][0]
-            # logging.info(f'img.shape{img.shape}')
-            img_meta = data['img_meta'][0].data[0]
-            # logging.debug(f'model forward start, img.type:{type(img)}, img:{img}, img_meta:{img_meta}')
-            # breakpoint()
-            outputs = model(img,return_loss=False)
-            output_numpys = []
-            for i in range(len(outputs)):
-                # output_data = outputs[i].get_data_to_numpy()
-                output_data = outputs[i]
-                output_numpys.append(output_data)
-                # logging.info(f"outputs[{i}] = {output_data.shape} {output_data}")
-            # logging.info(f"outputs[10] = {outputs[10].shape} {outputs[10]}")
+        results = []
+        prog_bar = mmcv.ProgressBar(len(dataset_test))
 
-            cate_preds = []
-            for i in range(5):
-                cate_preds.append([ms.Tensor(output_numpys[i])])
-            kernel_preds = []
-            for i in range(5):
-                kernel_preds.append(ms.Tensor(output_numpys[5 + i]))
-            seg_pred = ms.Tensor(output_numpys[10])
-            # logging.debug(f"model forward end, seg_result.type:{type(seg_result)}, {seg_result}")
-            seg_result = seg.get_seg(cate_preds= cate_preds, kernel_preds=kernel_preds, seg_pred=seg_pred, img_metas=img_meta, cfg=model.test_cfg, rescale=False)
-            result = get_masks(seg_result, num_classes=num_classes)
-            results.append(result)
-            prog_bar.update()
+        if arg.mode:
+            for i, data in enumerate(dataset_test):
+                data = data[0]
+                data['img_meta'][0] = data['img_meta'][0].data[0]
+                seg_result = model(return_loss=False, rescale=True, **data)
+                result = get_masks(seg_result, num_classes=num_classes)
+                results.append(result)
+                prog_bar.update()
+
+        else:
+            for i, data in enumerate(dataset_test):
+                data = data[0]
+                img = data['img'][0]
+                img_meta = data['img_meta'][0].data[0]
+                outputs = model(img,return_loss=False)
+                output_numpys = []
+                for i in range(len(outputs)):
+                    output_data = outputs[i]
+                    output_numpys.append(output_data)
+
+                cate_preds = []
+                for i in range(5):
+                    cate_preds.append([ms.Tensor(output_numpys[i])])
+                kernel_preds = []
+                for i in range(5):
+                    kernel_preds.append(ms.Tensor(output_numpys[5 + i]))
+                seg_pred = ms.Tensor(output_numpys[10])
+                seg_result = seg.get_seg(cate_preds= cate_preds, kernel_preds=kernel_preds, seg_pred=seg_pred, img_metas=img_meta, cfg=model.test_cfg, rescale=False)
+                result = get_masks(seg_result, num_classes=num_classes)
+                results.append(result)
+                prog_bar.update()
 
 
     annotation_file = os.path.join(arg.dataroot, "annotations/instances_val2017.json")
