@@ -1,18 +1,16 @@
 from six.moves import map, zip
 from functools import partial
-import numpy as np
 
 
 import mindspore
 import mindspore as ms
 from mindspore.ops import functional as F
-from mindspore.dataset import vision
-from mindspore.dataset.vision.utils import Inter
+from mindspore import mint
 
-from .conv_model import Conv2D_Compatible_With_Torch
 from . import mmcv_utils
 from .focal_loss_ms import SigmoidFoaclLoss
-import logging
+from .weight_init_utils import *
+
 
 def multi_apply(func, *args, **kwargs):
     pfunc = partial(func, **kwargs) if kwargs else func
@@ -25,8 +23,8 @@ def points_nms(heat, kernel=2):
     heat = heat.astype(ms.float16)
     hmax = ms.ops.max_pool2d(
         heat, (kernel, kernel), stride=1, padding=1)
-    #z3005003 max_pool2d
-    # hmax = hmax.astype(ori_type)
+
+    hmax = hmax.astype(ori_type)
     keep = (hmax[:, :, :-1, :-1] == heat).float()
     return heat * keep
 
@@ -45,11 +43,13 @@ def matrix_nms(seg_masks, cate_labels, cate_scores, kernel='gaussian', sigma=2.0
     Returns:
         Tensor: cate_scores_update, tensors of shape (n)
     """
-    n_samples = len(cate_labels)
+    # n_samples = len(cate_labels)
+    n_samples = cate_labels.shape[0]
+
     if n_samples == 0:
-        return []
-    if sum_masks is None:
-        sum_masks = seg_masks.sum((1, 2)).float()
+        n_samples =1
+    # if sum_masks is None:
+    #     sum_masks = seg_masks.sum((1, 2)).float()
     seg_masks = seg_masks.reshape(n_samples, -1).float()
     # inter.
     inter_matrix = ms.ops.mm(seg_masks, seg_masks.swapaxes(1, 0))
@@ -71,26 +71,18 @@ def matrix_nms(seg_masks, cate_labels, cate_scores, kernel='gaussian', sigma=2.0
     decay_iou = iou_matrix * label_matrix
 
     # matrix nms
-    if kernel == 'gaussian':
-        decay_matrix = ms.ops.exp(-1 * sigma * (decay_iou ** 2))
-        compensate_matrix = ms.ops.exp(-1 * sigma * (compensate_iou ** 2))
-        decay_coefficient, _ = (decay_matrix / compensate_matrix).min(0, return_indices=True)
-    elif kernel == 'linear':
-        decay_matrix = (1-decay_iou)/(1-compensate_iou)
-        decay_coefficient, _ = decay_matrix.min(0, return_indices=True)
-    else:
-        raise NotImplementedError
+    decay_matrix = ms.ops.exp(-1 * sigma * (decay_iou ** 2))
+    compensate_matrix = ms.ops.exp(-1 * sigma * (compensate_iou ** 2))
+    decay_coefficient, _ = (decay_matrix / compensate_matrix).min(0, return_indices=True)
+
 
     # update the score.
     cate_scores_update = cate_scores * decay_coefficient
     return cate_scores_update
 
 def dice_loss(input, target):
-    #z30055003
-    # input = input.view(input.shape[0], -1)
-    # target = target.view(target.shape[0], -1).float()
-    input = input.contiguous().view(input.shape[0], -1)
-    target = target.contiguous().view(target.shape[0], -1).float()
+    input = input.view(input.shape[0], -1)
+    target = target.view(target.shape[0], -1).float()
  
     a = mindspore.ops.sum(input * target, 1)
     b = mindspore.ops.sum(input * input, 1) + 0.001
@@ -99,17 +91,16 @@ def dice_loss(input, target):
     return 1-d
  
 def center_of_mass(bitmasks):
-    _, h, w = ms.ops.shape(bitmasks)
-    # logging.info(f'bitmask type:{type(bitmasks)} size:{_}, {h}, {w}')
+    _, h, w = bitmasks.shape
     ys = ms.ops.arange(0, h, dtype=ms.float32)
     xs = ms.ops.arange(0, w, dtype=ms.float32)
-    m00 = bitmasks.sum(axis=-1,dtype=ms.int64).sum(axis=-1,dtype=ms.int64).clamp(min=1e-6)
+    m00 = bitmasks.sum(axis=-1, dtype=ms.int64).sum(axis=-1, dtype=ms.int64).clamp(min=1e-6)
     m10 = (bitmasks * xs).sum(axis=-1).sum(axis=-1)
     m01 = (bitmasks * ys[:, None]).sum(axis=-1).sum(axis=-1)
-    # logging.info(f'm00:{m00}\n m10:{m10}\n m01:{m01}')
     center_x = m10 / m00
     center_y = m01 / m00
     return center_x, center_y
+
 
 class SOLOv2Head_ms(ms.nn.Cell):
 
@@ -189,32 +180,40 @@ class SOLOv2Head_ms(ms.nn.Cell):
                     bias=norm_cfg is None))
 
         self.solo_cate = Conv2D_Compatible_With_Torch(
-            self.seg_feat_channels, self.cate_out_channels, 3, padding=1, activation=None).to_float(ms.float16)
+            self.seg_feat_channels, self.cate_out_channels, 3, padding=1, activation=None)
 
         self.solo_kernel = Conv2D_Compatible_With_Torch(
-            self.seg_feat_channels, self.kernel_out_channels, 3, padding=1, activation=None).to_float(ms.float16)
+            self.seg_feat_channels, self.kernel_out_channels, 3, padding=1, activation=None)
 
-        
+    def init_weights(self):
+
+        for m in self.cate_convs:
+            normal_init(m.conv, std=0.01)
+        for m in self.kernel_convs:
+            normal_init(m.conv, std=0.01)
+        bias_cate = bias_init_with_prob(0.01)
+
+        normal_init(self.solo_cate, std=0.01, bias=bias_cate)
+        normal_init(self.solo_kernel, std=0.01)   
         
         
     def construct(self, feats, eval=False):
         new_feats = self.split_feats(feats)
         featmap_sizes = [featmap.shape[-2:] for featmap in new_feats]
         upsampled_size = (featmap_sizes[0][0] * 2, featmap_sizes[0][1] * 2)
-        cate_pred, kernel_pred = multi_apply(self.construct_single, new_feats,
+        cate_pred, kernel_pred = multi_apply(self.construct_single, list(new_feats),
                                              list(range(len(self.seg_num_grids))),
                                              eval=eval, upsampled_size=upsampled_size)
-        for item in cate_pred:
-            item = item.T
         return cate_pred, kernel_pred
 
-    
     def split_feats(self, feats):
-        return (F.interpolate(feats[0].astype(ms.float32), size=(int(feats[0].shape[-2] * 0.5), int(feats[0].shape[-1] * 0.5)), mode='bilinear'),
-        feats[1].astype(ms.float32),
-        feats[2].astype(ms.float32),
-        feats[3].astype(ms.float32),
-        F.interpolate(feats[4].astype(ms.float32), size=feats[3].shape[-2:], mode='bilinear'))
+        return (
+        F.interpolate(feats[0], size=(int(feats[0].shape[-2] * 0.5), int(feats[0].shape[-1] * 0.5)),
+                      mode='bilinear'),
+        feats[1],
+        feats[2],
+        feats[3],
+        F.interpolate(feats[4], size=feats[3].shape[-2:], mode='bilinear'))
 
     def construct_single(self, x, idx, eval=False, upsampled_size=None):
         ins_kernel_feat = x
@@ -231,40 +230,22 @@ class SOLOv2Head_ms(ms.nn.Cell):
         x = F.broadcast_to(x, tuple([ins_kernel_feat.shape[0], 1, -1, -1]))
 
         coord_feat = ms.ops.cat([x, y], axis=1)
-        # ori_type0 = ins_kernel_feat.dtype
-        # ori_type1 = coord_feat.dtype
-        # ins_kernel_feat = ins_kernel_feat.astype(ms.float16)
-        # coord_feat = coord_feat.astype(ms.float16)
-        # print('ins_kernel_feat',ins_kernel_feat.dtype, coord_feat.dtype)
-        ins_kernel_feat = ms.ops.cat([ins_kernel_feat.astype(ms.float32), coord_feat], axis=1)
-        # ins_kernel_feat = ins_kernel_feat.astype(ori_type0)
-        # coord_feat = coord_feat.astype(ori_type1)
 
-        # original
-        # coord_feat = ms.ops.functional.concat([x, y], axis=1)
-        # ori_type0 = ins_kernel_feat.dtype
-        # ori_type1 = coord_feat.dtype
-        # ins_kernel_feat = ins_kernel_feat.astype(ms.float16)
-        # coord_feat = coord_feat.astype(ms.float16)
-        # ins_kernel_feat = ms.ops.functional.concat([ins_kernel_feat, coord_feat], axis=1)
-        # ins_kernel_feat = ins_kernel_feat.astype(ori_type0)
-        # coord_feat = coord_feat.astype(ori_type1)
+        ins_kernel_feat = ms.ops.cat([ins_kernel_feat.astype(ms.float32), coord_feat], axis=1)
 
         # kernel branch
         kernel_feat = ins_kernel_feat
         seg_num_grid = self.seg_num_grids[idx]
 
         ori_type = kernel_feat.dtype
-        # import pdb;pdb.set_trace()
         kernel_feat = kernel_feat.astype(ms.float32)
-        #156 204 269 322 resize
-        # print("***************************333 : ",kernel_feat.dtype)
+        # 156 204 269 322 resize
+
         kernel_feat = F.interpolate(kernel_feat, size=(seg_num_grid, seg_num_grid), mode='bilinear')
         kernel_feat = kernel_feat.astype(ori_type)
 
         cate_feat = kernel_feat[:, :-2, :, :]
 
-        # kernel_feat = kernel_feat.contiguous()
 
         for i, kernel_layer in enumerate(self.kernel_convs):
             kernel_feat = kernel_layer(kernel_feat)
@@ -272,14 +253,12 @@ class SOLOv2Head_ms(ms.nn.Cell):
         kernel_pred = self.solo_kernel(kernel_feat)
 
         # cate branch
-        # cate_feat = cate_feat.contiguous()
         for i, cate_layer in enumerate(self.cate_convs):
             cate_feat = cate_layer(cate_feat)
         cate_pred = self.solo_cate(cate_feat)
         if eval:
             cate_pred = points_nms(cate_pred.sigmoid(), kernel=2).permute(0, 2, 3, 1)
         return cate_pred, kernel_pred
-    
 
     def get_seg(self, cate_preds, kernel_preds, seg_pred, img_metas, cfg, rescale=None):
         num_levels = len(cate_preds)
@@ -295,24 +274,21 @@ class SOLOv2Head_ms(ms.nn.Cell):
             seg_pred_list = seg_pred[img_id, ...].unsqueeze(0)
             kernel_pred_list = [
                 kernel_preds[i][img_id].permute(1, 2, 0).reshape(-1, self.kernel_out_channels)
-                                for i in range(num_levels)
+                for i in range(num_levels)
             ]
-            img_shape = img_metas[img_id]['img_shape'][0]
-            scale_factor = img_metas[img_id]['scale_factor'][0]
+            img_shape = img_metas[img_id]['img_shape']
+            scale_factor = img_metas[img_id]['scale_factor']
             ori_shape = img_metas[img_id]['ori_shape']
 
             cate_pred_list = ms.ops.cat(cate_pred_list, axis=0)
             kernel_pred_list = ms.ops.cat(kernel_pred_list, axis=0)
 
-            # original
-            # cate_pred_list = ms.ops.functional.concat(cate_pred_list, axis=0)
-            # kernel_pred_list = ms.ops.functional.concat(kernel_pred_list, axis=0)
-
+            # return self.get_seg_single(cate_pred_list, seg_pred_list, kernel_pred_list, featmap_size, img_shape, ori_shape, scale_factor, cfg, rescale)
             result = self.get_seg_single(cate_pred_list, seg_pred_list, kernel_pred_list,
-                                    featmap_size, img_shape, ori_shape, scale_factor, cfg, rescale)
+                                            featmap_size, img_shape, ori_shape, scale_factor, cfg, rescale)
             result_list.append(result)
         return result_list
-    
+
     def get_seg_single(self, 
                        cate_preds,
                        seg_preds,
@@ -330,117 +306,126 @@ class SOLOv2Head_ms(ms.nn.Cell):
         upsampled_size_out = (featmap_size[0] * 4, featmap_size[1] * 4)
 
         # process.
-        inds = (cate_preds > cfg.score_thr)
+        # inds = (cate_preds > cfg['score_thr'])
+        inds = (ms.ops.greater(cate_preds, cfg['score_thr']))
         # print("inds",inds)
-        cate_scores = cate_preds[inds]
-        if len(cate_scores) == 0:
-            return None
+        # breakpoint()
 
+        # cate_scores = cate_preds[inds]
+        cate_scores = ms.ops.masked_select(cate_preds, inds)
+        if cate_scores.shape[0] == 0:
+            return ms.Tensor([0],dtype=ms.bool_), ms.Tensor([0], dtype=ms.int64), ms.Tensor([0], dtype=ms.float32)
         # cate_labels & kernel_preds
         inds = inds.nonzero()
-        cate_labels = inds[:, 1]
-        kernel_preds = kernel_preds[inds[:, 0]]
+        # cate_labels = inds[:, 1]
+        # kernel_preds = kernel_preds[inds[:, 0]]
+        # breakpoint()
+        cate_labels = ms.ops.slice(inds, (0,1), (-1,1)).squeeze(1)
+        kernel_preds = ms.ops.gather(kernel_preds, ms.ops.slice(inds, (0,0), (-1,1)).squeeze(1), axis=0)
 
         # trans vector.
-        size_trans = ms.tensor(self.seg_num_grids, dtype=cate_labels.dtype).pow(2)
-        ori_type = size_trans.dtype
-        size_trans = size_trans.astype(ms.float16).cumsum(0)
-        size_trans = size_trans.astype(ori_type)
-        strides = ms.numpy.ones((int(size_trans[-1].numpy()),))
+        # breakpoint()
+        # size_trans = ms.tensor(self.seg_num_grids, dtype=cate_labels.dtype).pow(2)
+        size_trans = np.power(np.array(self.seg_num_grids), 2).cumsum(0)
+        strides = np.ones((int(size_trans[-1])))
 
         n_stage = len(self.seg_num_grids)
-        strides[:size_trans[0]] *= self.strides[0]
+        # breakpoint()
+        strides[:size_trans[0]] = strides[:size_trans[0]] * self.strides[0]
         for ind_ in range(1, n_stage):
-            strides[size_trans[ind_-1]:size_trans[ind_]] *= self.strides[ind_]
-        strides = strides[inds[:, 0]]
+            strides[size_trans[ind_-1]:size_trans[ind_]] = strides[size_trans[ind_-1]:size_trans[ind_]] * self.strides[ind_]
+        # strides = strides[inds[:, 0]]
+        strides = ms.Tensor(strides)
+        strides = ms.ops.gather(strides, ms.ops.slice(inds, (0,0), (-1,1)).squeeze(1), axis=0)
         # mask encoding.
         I, N = kernel_preds.shape
-        kernel_preds = kernel_preds.view(I, N, 1, 1)
-        ori_type0 = seg_preds.dtype
-        ori_type1 = kernel_preds.dtype
-        seg_preds = seg_preds.astype(ms.float16)
-        kernel_preds = kernel_preds.astype(ms.float16)
-        seg_preds = ms.ops.conv2d(seg_preds, kernel_preds, stride=1).squeeze(0).sigmoid()
-        seg_preds = seg_preds.astype(ori_type0)
-        kernel_preds = kernel_preds.astype(ori_type1)
+        kernel_preds = kernel_preds.reshape(I, N, 1, 1)
+        # self.conv_weight = kernel_preds
+        # self.conv.weight = self.conv_weight
+        # seg_preds = self.conv(seg_preds).squeeze(0).sigmoid()
+        # print(f'kernel_preds shape: {kernel_preds.shape}')
+        seg_preds = mint.conv2d(seg_preds, kernel_preds, stride=1).squeeze(0).sigmoid()
+        # conv = ms.nn.Conv2d(in_channels=I, out_channels=N, kernel_size=(1,1),stride=1)
+        # conv.weight = self.conv_weight
+        # conv = MineConv(I, N, kernel_preds)
+        # seg_preds = conv(seg_preds)
+
         # mask.
-        seg_masks = seg_preds > cfg.mask_thr
+        seg_masks = ms.ops.greater(seg_preds, cfg['mask_thr'])
         sum_masks = seg_masks.sum((1, 2)).float()
         # filter.
-        keep = sum_masks > strides
-        if keep.sum() == 0:
-            return None
-        input_indices  = []
-        temp = 0
+        keep = ms.ops.greater(sum_masks, strides)
+        if ms.ops.sum(keep)== 0:
+            return ms.Tensor([0],dtype=ms.bool_), ms.Tensor([0], dtype=ms.int64), ms.Tensor([0], dtype=ms.float32)
 
-        keep = keep.asnumpy().tolist()
-
-        # seg_masks = seg_masks[keep, ...] # bool
-        seg_masks = seg_masks.asnumpy()
-        seg_masks = seg_masks[keep, ...]
-        seg_masks = ms.Tensor(seg_masks)
-
-        seg_preds = seg_preds.asnumpy()
-        seg_preds = seg_preds[keep, ...] # float16
-        seg_preds = ms.Tensor(seg_preds)
-
-        sum_masks = sum_masks[keep]      # float32
-        cate_scores = cate_scores[keep]  # float32
-        cate_labels = cate_labels[keep]  # int
+        idx = ms.ops.nonzero(keep).T[0]
+        seg_masks = ms.ops.gather(seg_masks.astype(ms.int32),idx,0).astype(bool)
+        seg_preds = ms.ops.gather(seg_preds,idx,0)
+        sum_masks = ms.ops.gather(sum_masks,idx,0)
+        cate_scores = ms.ops.gather(cate_scores,idx,0)
+        cate_labels = ms.ops.gather(cate_labels,idx,0)
 
 
         # maskness.
         seg_scores = (seg_preds * seg_masks.float()).sum((1, 2)) / sum_masks
-        cate_scores *= seg_scores
+        cate_scores = cate_scores * seg_scores
 
         # sort and keep top nms_pre
         sort_inds = ms.ops.argsort(cate_scores, descending=True)
-        if len(sort_inds) > cfg.nms_pre:
-            sort_inds = sort_inds[:cfg.nms_pre]
-        
-        sort_inds = sort_inds.asnumpy().tolist()
+        # breakpoint()
 
-        seg_masks = seg_masks.asnumpy()
-        seg_masks = seg_masks[sort_inds, :, :]
-        seg_masks = ms.Tensor(seg_masks)
+        seg_masks = ms.ops.gather(seg_masks.astype(ms.int32),sort_inds,axis=0).astype(bool)
+        seg_preds = ms.ops.gather(seg_preds,sort_inds,0)
+        sum_masks = ms.ops.gather(sum_masks,sort_inds,0)
+        cate_scores = ms.ops.gather(cate_scores,sort_inds,0)
+        cate_labels = ms.ops.gather(cate_labels,sort_inds,0)
 
-        seg_preds = seg_preds.asnumpy()
-        seg_preds = seg_preds[sort_inds, :, :]
-        seg_preds = ms.Tensor(seg_preds)
-
-        sum_masks = sum_masks[sort_inds]
-        cate_scores = cate_scores[sort_inds]
-        cate_labels = cate_labels[sort_inds]
-        # print("G", seg_masks)
-
-        # Matrix NMS
+        # # Matrix NMS
         cate_scores = matrix_nms(seg_masks, cate_labels, cate_scores,
-                                    kernel=cfg.kernel,sigma=cfg.sigma, sum_masks=sum_masks)
+                                    kernel='gaussian', sigma=2.0, sum_masks=sum_masks)
 
         # filter.
-        keep = cate_scores >= cfg.update_thr
-        if keep.sum() == 0:
-            return None
-
-        seg_preds = seg_preds[keep, :, :]
-        cate_scores = cate_scores[keep]
-        cate_labels = cate_labels[keep]
+        # keep = cate_scores >= cfg['update_thr']
+        keep = ms.ops.greater(cate_scores, cfg['update_thr'])
+        if ms.ops.sum(keep)== 0:
+            return ms.Tensor([0],dtype=ms.bool_), ms.Tensor([0], dtype=ms.int64), ms.Tensor([0], dtype=ms.float32)
+        # breakpoint()
+        temp = ms.ops.nonzero(keep).T[0]
+        seg_preds = ms.ops.gather(seg_preds,temp,axis=0)
+        cate_scores = ms.ops.gather(cate_scores,temp,0)
+        cate_labels = ms.ops.gather(cate_labels,temp,axis=0)
+        # seg_preds = seg_preds[keep, :, :]
+        # cate_scores = cate_scores[keep]
+        # cate_labels = cate_labels[keep]
 
         # sort and keep top_k
         sort_inds = ms.ops.argsort(cate_scores, descending=True)
-        if len(sort_inds) > cfg.max_per_img:
-            sort_inds = sort_inds[:cfg.max_per_img]
-        seg_preds = seg_preds[sort_inds, :, :]
-        cate_scores = cate_scores[sort_inds]
-        cate_labels = cate_labels[sort_inds]
+        # if len(sort_inds) > cfg['max_per_img']:
+        #     sort_inds = sort_inds[:cfg['max_per_img']]
+        # seg_preds = seg_preds[sort_inds, :, :]
+        
+        # cate_scores = cate_scores[sort_inds]
+        # cate_labels = cate_labels[sort_inds]
 
+        # temp2 = ms.ops.nonzero(sort_inds).T[0]
+        # breakpoint()
+        seg_preds = ms.ops.gather(seg_preds,sort_inds,axis=0)
+        cate_scores = ms.ops.gather(cate_scores,sort_inds,0)
+        cate_labels = ms.ops.gather(cate_labels,sort_inds,0)
+
+        
         seg_preds = F.interpolate(seg_preds.unsqueeze(0),
                                     size=upsampled_size_out,
-                                    mode='bilinear')[:, :, :h, :w]
+                                    mode='bilinear')
+        # breakpoint()
+        # seg_preds = seg_preds[:, :, :h, :w]
+        # seg_preds = ms.ops.gather(seg_preds, )
+        seg_preds = ms.ops.slice(seg_preds, (0, 0, 0, 0), (-1, -1, h, w))
         seg_masks = F.interpolate(seg_preds,
-                               size=ori_shape[0][:2],
+                               size=ori_shape[:2],
                                mode='bilinear').squeeze(0)
-        seg_masks = seg_masks > cfg.mask_thr
+        # seg_masks = seg_masks > cfg['mask_thr']
+        seg_masks = ms.ops.greater(seg_masks, cfg['mask_thr'])
         return seg_masks, cate_labels, cate_scores
 
     def loss(self,
@@ -453,54 +438,49 @@ class SOLOv2Head_ms(ms.nn.Cell):
              img_metas,
              cfg,
              gt_bboxes_ignore=None):
-        # import pdb;pdb.set_trace()
-        mask_feat_size = ins_pred.shape[-2:]#torch_size(1, 256, 160, 240)
-        # gt_bbox_list = [gt_bbox_list.data]#shape=[1, 4]
-        # gt_label_list = [gt_label_list.data]#shape=[1]
-        # gt_mask_list = [gt_mask_list.data]#(1, 640, 960)
-        # gt_bbox_list = [gt_bbox_list]#shape=[1, 4]
-        # gt_label_list = [gt_label_list]#shape=[1]
-        # gt_mask_list = [gt_mask_list]#(1, 640, 960)
-        #z30055003 去掉datacontainer 换成list
+
+        mask_feat_size = ins_pred.shape[-2:]  # torch_size(1, 256, 160, 240)
+
         if str(type(gt_bbox_list)) == "<class 'dataloader.data_container.DataContainer'>":
-            gt_bbox_list = [gt_bbox_list.data]#shape=[1, 4]
+            gt_bbox_list = [gt_bbox_list.data]  # shape=[1, 4]
         if str(type(gt_label_list)) == "<class 'dataloader.data_container.DataContainer'>":
-            gt_label_list = [gt_label_list.data]#shape=[1]
+            gt_label_list = [gt_label_list.data]  # shape=[1]
         if str(type(gt_mask_list)) == "<class 'dataloader.data_container.DataContainer'>":
-            gt_mask_list = [gt_mask_list.data]#(1, 640, 960)
+            gt_mask_list = [gt_mask_list.data]  # (1, 640, 960)
         ins_label_list, cate_label_list, ins_ind_label_list, grid_order_list = multi_apply(
             self.solov2_target_single,
             gt_bbox_list,
             gt_label_list,
-            gt_mask_list, 
+            gt_mask_list,
             mask_feat_size=mask_feat_size)
-        #ins_label_list : [shape=[2, 160, 240],shape=[0],shape=[0],shape=[0],shape=[0]]
-        #cate_label_list : [shape=[40, 40],shape=[36, 36],shape=[24, 24],shape=[16, 16],shape=[12, 12]]
-        #ins_ind_label_list : [shape=[1600],shape=[1296],shape=[576],shape=[256],shape=[144]]
-        #grid_order_list : [[[840, 880], [], [], [], []]]
+
         ins_labels = [mindspore.ops.cat([ins_labels_level_img
-                                 for ins_labels_level_img in ins_labels_level], 0)
+                                         for ins_labels_level_img in ins_labels_level], 0)
                       for ins_labels_level in zip(*ins_label_list)]
-        #ins_labels [Tensor(shape=[2, 160, 240],...]
+        # ins_labels [Tensor(shape=[2, 160, 240],...]
         new_kernel_preds_result = []
-        #[kernel_preds_level_img.view(kernel_preds_level_img.shape[0], -1)[:, grid_orders_level_img]
+        # [kernel_preds_level_img.view(kernel_preds_level_img.shape[0], -1)[:, grid_orders_level_img]
         for kernel_preds_level, grid_orders_level in zip(kernel_preds, zip(*grid_order_list)):
             kernel_preds_level_result = []
             for kernel_preds_level_img, grid_orders_level_img in zip(kernel_preds_level, grid_orders_level):
                 if len(grid_orders_level_img) == 0:
-                    continue
-                kernel_preds_level_img = kernel_preds_level_img.view(kernel_preds_level_img.shape[0], -1)[:, grid_orders_level_img]
+                    kernel_preds_level_img = kernel_preds_level_img.view(kernel_preds_level_img.shape[0], -1)[0, 0]
+                else:
+                    kernel_preds_level_img = kernel_preds_level_img.view(kernel_preds_level_img.shape[0], -1)[:,
+                                             grid_orders_level_img]
                 kernel_preds_level_result.append(kernel_preds_level_img)
             new_kernel_preds_result.append(kernel_preds_level_result)
-        
+
         kernel_preds = new_kernel_preds_result
-    
+
         # generate masks
         ins_pred = ins_pred
         ins_pred_list = []
         for b_kernel_pred in kernel_preds:
             b_mask_pred = []
             for idx, kernel_pred in enumerate(b_kernel_pred):
+                if kernel_pred.shape == ():
+                    continue
                 if kernel_pred.shape[-1] == 0:
                     continue
                 cur_ins_pred = ins_pred[idx, ...]
@@ -508,7 +488,7 @@ class SOLOv2Head_ms(ms.nn.Cell):
                 N, I = kernel_pred.shape[0], kernel_pred.shape[1]
                 cur_ins_pred = cur_ins_pred.unsqueeze(0)
                 kernel_pred = kernel_pred.permute(1, 0).view(I, -1, 1, 1)
-                #z30055003 fp32 -> fp16
+                # z30055003 fp32 -> fp16
                 if kernel_pred.dtype == mindspore.float16:
                     cur_ins_pred = mindspore.ops.conv2d(cur_ins_pred.astype(ms.float16), kernel_pred, stride=1).view(-1, H, W)
                 else:
@@ -517,93 +497,67 @@ class SOLOv2Head_ms(ms.nn.Cell):
             if len(b_mask_pred) == 0:
                 b_mask_pred = None
             else:
-                #z30055003 ops.cat不支持bool类型
-                b_mask_pred = ms.Tensor(np.concatenate([x.asnumpy() for x in b_mask_pred]))
-                # b_mask_pred = mindspore.ops.cat(b_mask_pred, 0)
+                b_mask_pred = mindspore.ops.cat(b_mask_pred, 0)
             ins_pred_list.append(b_mask_pred)
 
-        # ins_ind_labels = [
-        #     torch.cat([ins_ind_labels_level_img.flatten()
-        #                for ins_ind_labels_level_img in ins_ind_labels_level])
-        #     for ins_ind_labels_level in zip(*ins_ind_label_list)
-        # ]# [torch.Size([1600]),torch.Size([1296]),torch.Size([576]),torch.Size([256]),torch.Size([144])] 2:shape乘2
         ins_ind_labels = [
             ms.Tensor(np.concatenate([ins_ind_labels_level_img.asnumpy().flatten()
-                       for ins_ind_labels_level_img in ins_ind_labels_level]))
+                                      for ins_ind_labels_level_img in ins_ind_labels_level]))
             for ins_ind_labels_level in zip(*ins_ind_label_list)
         ]
-        # flatten_ins_ind_labels = mindspore.ops.cat(ins_ind_labels)
         flatten_ins_ind_labels = ms.Tensor(np.concatenate([x.asnumpy() for x in ins_ind_labels]))
-        # num_ins = flatten_ins_ind_labels.sum()
         num_ins = ms.ops.sum(flatten_ins_ind_labels)
- 
+
         # dice loss
         loss_ins = []
-        for input, target in zip(ins_pred_list, ins_labels):#target torch.Size([8, 192, 256]) torch.Size([8, 192, 256])
+        for input, target in zip(ins_pred_list,
+                                 ins_labels):  # target torch.Size([8, 192, 256]) torch.Size([8, 192, 256])
             if input is None:
                 continue
             input = mindspore.ops.sigmoid(input)
             loss_ins.append(dice_loss(input, target))
-        loss_ins = ms.Tensor(np.concatenate([x.asnumpy() for x in loss_ins])).mean()
-        #loss_ins = mindspore.ops.cat(loss_ins).mean()
+        loss_ins = mindspore.ops.cat(loss_ins).mean()
         loss_ins = loss_ins * self.ins_loss_weight
-        
-        # cate
-        # cate_labels = [
-        #     ms.Tensor(np.concatenate([cate_labels_level_img.asnumpy().flatten()
-        #                for cate_labels_level_img in cate_labels_level]))
-        #     for cate_labels_level in zip(*cate_label_list)
-        # ]
+
         cate_labels = [
             mindspore.ops.cat([cate_labels_level_img.flatten()
-                       for cate_labels_level_img in cate_labels_level])
+                               for cate_labels_level_img in cate_labels_level])
             for cate_labels_level in zip(*cate_label_list)
         ]
         flatten_cate_labels = mindspore.ops.cat(cate_labels)
- 
+
         cate_preds = [
             cate_pred.permute(0, 2, 3, 1).reshape(-1, self.cate_out_channels)
             for cate_pred in cate_preds
         ]
         flatten_cate_preds = mindspore.ops.cat(cate_preds)
- 
+
         loss_cate_value = self.call_loss_cate(flatten_cate_preds, flatten_cate_labels, avg_factor=num_ins + 1)
-        logging.info(f"loss_ins:{loss_ins}, loss_cate:{loss_cate_value}")
+        print(f"loss_ins:{loss_ins}, loss_cate:{loss_cate_value}")
         return dict(
             loss_ins=loss_ins,
             loss_cate=loss_cate_value)
- 
-    
+
     def solov2_target_single(self, gt_bboxes_raw, gt_labels_raw, gt_masks_raw, mask_feat_size):
-        # logging.info(f'input: gt_bboxes_raw:{gt_bboxes_raw}\n gt_labels_raw:{gt_labels_raw}\n gt_masks_raw:{gt_masks_raw} mask_feat_size:{mask_feat_size}')
-        # logging.info(f"mask_feat_size:{mask_feat_size}")
- 
-        # ins
-        
-        #z30055003 
-        # ms.ops.
-        # import pdb;pdb.set_trace()
         gt_areas = ms.ops.sqrt((gt_bboxes_raw[:, 2] - gt_bboxes_raw[:, 0]) * (
-                gt_bboxes_raw[:, 3] - gt_bboxes_raw[:, 1]))  
+                gt_bboxes_raw[:, 3] - gt_bboxes_raw[:, 1]))
         ins_label_list = []
         cate_label_list = []
         ins_ind_label_list = []
         grid_order_list = []
         for (lower_bound, upper_bound), stride, num_grid \
                 in zip(self.scale_ranges, self.strides, self.seg_num_grids):
-            #z30055003
-            # hit_indices = ((gt_areas >= lower_bound) & (gt_areas <= upper_bound)).nonzero().flatten()
-            hit_indices = ms.ops.logical_and((gt_areas >= lower_bound),(gt_areas <= upper_bound)).nonzero()
+
+            hit_indices = ms.ops.logical_and((gt_areas >= lower_bound), (gt_areas <= upper_bound)).nonzero()
             if hit_indices.shape[0] != 0:
                 hit_indices = hit_indices.flatten()
-            
+
             num_ins = len(hit_indices)
-            # logging.info(f'hit_indices:{hit_indices} {type(hit_indices)}\n num_ins:{num_ins}') #ok
             ins_label = []
             grid_order = []
             cate_label = ms.ops.zeros([num_grid, num_grid], dtype=ms.int64)
             ins_ind_label = ms.ops.zeros([num_grid ** 2], dtype=ms.bool_)
- 
+
             if num_ins == 0:
                 ins_label = ms.ops.zeros([0, mask_feat_size[0], mask_feat_size[1]], dtype=ms.uint8)
                 ins_label_list.append(ins_label)
@@ -616,42 +570,42 @@ class SOLOv2Head_ms(ms.nn.Cell):
             gt_masks = gt_masks_raw[hit_indices.asnumpy(), ...]
             half_ws = 0.5 * (gt_bboxes[:, 2] - gt_bboxes[:, 0]) * self.sigma
             half_hs = 0.5 * (gt_bboxes[:, 3] - gt_bboxes[:, 1]) * self.sigma
- 
+
             # mass center
-            gt_masks_pt = ms.Tensor(gt_masks, dtype=ms.int64) #转换数据类型
-            # import pdb;pdb.set_trace()
+            gt_masks_pt = ms.Tensor(gt_masks, dtype=ms.int64)  # 转换数据类型
             center_ws, center_hs = center_of_mass(gt_masks_pt)
-            # logging.info(f'center_ws:{center_ws}, center_hs:{center_hs}')
             valid_mask_flags = gt_masks_pt.sum(axis=-1).sum(axis=-1) > 0
- 
+
             output_stride = 4
-            for seg_mask, gt_label, half_h, half_w, center_h, center_w, valid_mask_flag in zip(gt_masks, gt_labels, half_hs, half_ws, center_hs, center_ws, valid_mask_flags):
+            for seg_mask, gt_label, half_h, half_w, center_h, center_w, valid_mask_flag in zip(gt_masks, gt_labels,
+                                                                                               half_hs, half_ws,
+                                                                                               center_hs, center_ws,
+                                                                                               valid_mask_flags):
                 if not valid_mask_flag:
                     continue
                 upsampled_size = (mask_feat_size[0] * 4, mask_feat_size[1] * 4)
                 coord_w = int((center_w / upsampled_size[1]) // (1. / num_grid))
                 coord_h = int((center_h / upsampled_size[0]) // (1. / num_grid))
- 
+
                 # left, top, right, down
                 top_box = max(0, int(((center_h - half_h) / upsampled_size[0]) // (1. / num_grid)))
                 down_box = min(num_grid - 1, int(((center_h + half_h) / upsampled_size[0]) // (1. / num_grid)))
                 left_box = max(0, int(((center_w - half_w) / upsampled_size[1]) // (1. / num_grid)))
                 right_box = min(num_grid - 1, int(((center_w + half_w) / upsampled_size[1]) // (1. / num_grid)))
- 
-                top = max(top_box, coord_h-1)
-                down = min(down_box, coord_h+1)
-                left = max(coord_w-1, left_box)
-                right = min(right_box, coord_w+1)
- 
-                cate_label[top:(down+1), left:(right+1)] = gt_label
-                #z30055003 使用opencv的操作，需要改成mindspore的操作
-                seg_mask = mmcv_utils.imrescale(seg_mask, scale=1. / output_stride)  #todo
-                # seg_mask = imrescale(seg_mask, scale=1. / output_stride)
+
+                top = max(top_box, coord_h - 1)
+                down = min(down_box, coord_h + 1)
+                left = max(coord_w - 1, left_box)
+                right = min(right_box, coord_w + 1)
+
+                cate_label[top:(down + 1), left:(right + 1)] = gt_label
+
+                seg_mask = mmcv_utils.imrescale(seg_mask, scale=1. / output_stride)  # todo
                 seg_mask = ms.Tensor(seg_mask)
-                for i in range(top, down+1):
-                    for j in range(left, right+1):
+                for i in range(top, down + 1):
+                    for j in range(left, right + 1):
                         label = int(i * num_grid + j)
- 
+
                         cur_ins_label = ms.ops.zeros([mask_feat_size[0], mask_feat_size[1]], dtype=ms.uint8)
                         cur_ins_label[:seg_mask.shape[0], :seg_mask.shape[1]] = seg_mask
                         ins_label.append(cur_ins_label)
@@ -665,15 +619,14 @@ class SOLOv2Head_ms(ms.nn.Cell):
             cate_label_list.append(cate_label)
             ins_ind_label_list.append(ins_ind_label)
             grid_order_list.append(grid_order)
-        # logging.info(f'output ins_label_list:{ins_label_list}\n cate_label_list:{cate_label_list}\n, ins_ind_label_list:{ins_ind_label_list}\n grid_order_list:{grid_order_list}')
+
         return ins_label_list, cate_label_list, ins_ind_label_list, grid_order_list
-    
- 
+
     def build_focal_loss(self, config):
         ms_s_focal_loss = SigmoidFoaclLoss(weight=None, gamma=config['gamma'], alpha=config['alpha'],
-                                       reduction="mean")
+                                           reduction="mean")
         return ms_s_focal_loss
- 
+
     def call_loss_cate(self, flatten_cate_preds, flatten_cate_labels, avg_factor):
         num_classes = flatten_cate_preds.shape[1]
         one_hot = mindspore.ops.OneHot()

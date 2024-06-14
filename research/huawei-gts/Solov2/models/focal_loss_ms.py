@@ -61,7 +61,7 @@ class SigmoidFoaclLoss(nn.Cell):
                 elif self.weight.ndim != loss.ndim:
                     raise ValueError(f"weight shape {self.weight.shape} is not match to loss shape {loss.shape}")
             loss = loss * weight
-        print(loss)
+        #print(loss)
         loss = self.weight_reduce_loss(loss)
         return loss
  

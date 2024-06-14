@@ -15,7 +15,7 @@ from dataloader.multi_scale_flip_aug import MultiScaleFlipAug, ResizeOperation, 
 from models.solov2 import SOLOv2
 
 
-ms.set_context(device_target='Ascend', device_id=5)
+ms.set_context(device_target='Ascend')#, device_id=5
 # ms.set_context(device_target='CPU')
 
 def build_from_cfg_ms(cfg, default_args=None):

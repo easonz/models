@@ -1,12 +1,7 @@
 """ network initialized related"""
-import math
-from functools import reduce
+
 
 import mindspore as ms
-import numpy as np
-from mindspore.common import initializer as init
-from mindspore.common.initializer import Initializer as MeInitializer
-from mindspore.nn.layer.conv import Conv1d, Conv2d, Conv3d
 from typing import Union, Tuple
         
         
@@ -89,7 +84,10 @@ class Conv2D_Compatible_With_Torch(ms.nn.Cell):
 
     
     def construct(self, x):
+        ori_type = x.dtype
+        # x = x.astype(ms.float16)
         x = self.conv(x)
+        # x = x.astype(ori_type)
         if self.with_norm:
             x = getattr(self, self.norm_name)(x)
         if self.with_activation:
@@ -289,14 +287,10 @@ def build_norm_layer(cfg, num_features, postfix=''):
     cfg_.setdefault('eps', 1e-5)
     if layer_type != 'GN':
         layer = norm_layer(num_features, **cfg_)
-        if layer_type == 'SyncBN':
-            layer._specify_ddp_gpu_num(1)
     else:
         assert 'num_groups' in cfg_
         layer = norm_layer(num_channels=num_features, **cfg_)
 
-    for param in layer.get_parameters():
-        param.requires_grad = requires_grad
 
     return name, layer
 
@@ -315,9 +309,6 @@ def deform_conv2d(input, offset, weight, bias=None, stride=(1, 1), padding=(0, 0
     offset = offset.reshape((batch, offset_groups, kernel_height, kernel_weight, 2, out_height, out_width))
     offset_y, offset_x = ms.ops.chunk(offset, 2, axis=4)
     mask = mask.reshape((batch, offset_groups, kernel_height, kernel_weight, 1, out_height, out_width))
-    # logging.debug(f"offset_x.shape:{offset_x.shape}, {offset_x.flatten()}")
-    # logging.debug(f"offset_y.shape:{offset_y.shape}, {offset_y.flatten()}")
-    # logging.debug(f"mask.shape:{mask.shape}, {mask.flatten()}")
 
     ms_offsets = ms.ops.functional.concat([offset_x, offset_y, mask], axis=1)
     ms_offsets = ms_offsets.reshape(batch, 3 * offset_groups * kernel_height * kernel_weight, out_height, out_width)
@@ -333,6 +324,5 @@ def deform_conv2d(input, offset, weight, bias=None, stride=(1, 1), padding=(0, 0
     ms_deformable_groups = 1
     ms_modulated = True
 
-    # logging.info(f"ms.ops.deformable_conv2d x.shape:{ms_x.shape}, weight.shape:{ms_weight.shape}, offsets.shape:{ms_offsets.shape}, kernel_size:{ms_kernel_size}, strides:{ms_strides}, padding:{ms_padding}, bias:{ms_bias}, dilations:{ms_dilations}, groups:{ms_groups}, deformable_groups:{ms_deformable_groups}, modulated:{ms_modulated}")
     return ms.ops.deformable_conv2d(x=ms_x, weight=ms_weight, offsets=ms_offsets, kernel_size=ms_kernel_size, strides=ms_strides, padding=ms_padding,
         bias=ms_bias, dilations=ms_dilations, groups=ms_groups, deformable_groups=ms_deformable_groups, modulated=ms_modulated)

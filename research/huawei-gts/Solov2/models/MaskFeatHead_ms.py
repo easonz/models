@@ -1,6 +1,7 @@
 import mindspore as ms
 from .conv_model import Conv2D_Compatible_With_Torch
 from mindspore.ops import functional as F
+from .weight_init_utils import *
 
 
 class MaskFeatHead_ms(ms.nn.Cell):
@@ -87,6 +88,11 @@ class MaskFeatHead_ms(ms.nn.Cell):
                 norm_cfg=self.norm_cfg),
         )
 
+    def init_weights(self):
+        for m in self.cells():
+            if isinstance(m, ms.nn.Conv2d):
+                normal_init(m, std=0.01)
+
         
     def construct(self, inputs):
         assert len(inputs) == (self.end_level - self.start_level + 1)
@@ -105,8 +111,8 @@ class MaskFeatHead_ms(ms.nn.Cell):
                 coord_feat = ms.ops.cat([x, y], 1)
                 ori_type0 = coord_feat.dtype
                 ori_type1 = input_p.dtype
-                coord_feat = coord_feat.astype(ms.float16)
-                input_p = input_p.astype(ms.float16)
+                # coord_feat = coord_feat.astype(ms.float16)
+                # input_p = input_p.astype(ms.float16)
                 input_p = ms.ops.cat([input_p, coord_feat], 1)
                 input_p = input_p.astype(ori_type1)
                 coord_feat = coord_feat.astype(ori_type0)

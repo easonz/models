@@ -10,7 +10,7 @@ def assert_tensor_type(func: Callable) -> Callable:
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        if not isinstance(args[0].data, mindspore.Tensor):
+        if not isinstance(args[0].data, mindspore.Tensor) and not isinstance(args[0].data, np.ndarray): #zjy
             raise AttributeError(
                 f'{args[0].__class__.__name__} has no attribute '
                 f'{func.__name__} for type {args[0].datatype}')
@@ -61,7 +61,7 @@ class DataContainer:
 
     @property
     def datatype(self) -> Union[Type, str]:
-        if isinstance(self.data, torch.Tensor):
+        if isinstance(self.data, mindspore.Tensor):
             return self.data.type()
         else:
             return type(self.data)
@@ -89,3 +89,4 @@ class DataContainer:
     @assert_tensor_type
     def dim(self) -> int:
         return self.data.dim()
+

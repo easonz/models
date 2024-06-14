@@ -51,7 +51,6 @@ def imresize(img, size, return_scale=False, interpolation='bilinear'):
             `resized_img`.
     """
     h, w = img.shape[:2]
-    # logging.debug(f"h={h}, w={w}, img={img}")
     resized_img = cv2.resize(
         img, size, interpolation=interp_codes[interpolation])
     if not return_scale:

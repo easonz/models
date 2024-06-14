@@ -1,7 +1,7 @@
 import mindspore as ms
-from .conv_model import Conv2D_Compatible_With_Torch
-from mindspore.common import initializer as init
 from mindspore.ops import functional as F
+from .weight_init_utils import *
+
 
 class FPN_MindSpore(ms.nn.Cell):
     def __init__(self,
@@ -43,6 +43,7 @@ class FPN_MindSpore(ms.nn.Cell):
         self.end_level = end_level
         self.add_extra_convs = add_extra_convs
         self.extra_convs_on_inputs = extra_convs_on_inputs
+        self.maxpool = ms.nn.MaxPool2d(kernel_size=1, stride=2, pad_mode='pad')
 
         for i in range(self.start_level, self.backbone_end_level):
             l_conv = Conv2D_Compatible_With_Torch(
@@ -52,7 +53,7 @@ class FPN_MindSpore(ms.nn.Cell):
                 conv_cfg=conv_cfg,
                 norm_cfg=norm_cfg if not self.no_norm_on_lateral else None,
                 activation=self.activation,
-                weight_init="XavierUniform").to_float(ms.float16)
+                weight_init="XavierUniform")
             fpn_conv = Conv2D_Compatible_With_Torch(
                 out_channels,
                 out_channels,
@@ -61,7 +62,7 @@ class FPN_MindSpore(ms.nn.Cell):
                 norm_cfg=norm_cfg if not self.no_norm_on_lateral else None,
                 activation=self.activation,
                 padding=1,
-                weight_init="XavierUniform").to_float(ms.float16)
+                weight_init="XavierUniform")
 
             self.lateral_convs.append(l_conv)
             self.fpn_convs.append(fpn_conv)
@@ -83,8 +84,13 @@ class FPN_MindSpore(ms.nn.Cell):
                     conv_cfg=conv_cfg,
                     norm_cfg=norm_cfg if not self.no_norm_on_lateral else None,
                     activation=self.activation,
-                    weight_init="XavierUniform").to_float(ms.float16)
+                    weight_init="XavierUniform")
                 self.fpn_convs.append(extra_fpn_conv)
+
+    def init_weights(self):
+        for m in self.cells():
+            if isinstance(m, ms.nn.Conv2d):
+                xavier_init(m, distribution='uniform')
 
     def construct(self, inputs):
         assert len(inputs) == len(self.in_channels)
@@ -97,8 +103,6 @@ class FPN_MindSpore(ms.nn.Cell):
         used_backbone_levels = len(laterals)
         for i in range(used_backbone_levels - 1, 0, -1):
             last_h, last_w = laterals[i - 1].shape[-2:]
-            #z30055003 zcx 修改输入为fp32
-            # print("***************************FPN102 : ",laterals[i].dtype)
             laterals[i - 1] += F.interpolate(
                 laterals[i].astype(ms.float32), size=(last_h, last_w), mode='nearest')
 
@@ -115,10 +119,7 @@ class FPN_MindSpore(ms.nn.Cell):
                 for i in range(self.num_outs - used_backbone_levels):
                     temp = outs[-1]
                     ori_type = temp.dtype
-                    outs[-1] = outs[-1].astype(ms.float16)
-                    #z30055003 max_pool2d
-                    out = F.max_pool2d(outs[-1], 1, stride=2)
-                    # out = out.astype(ori_type)
+                    out = self.maxpool(outs[-1])
                     outs.append(out)
             # add conv layers on top of original feature maps (RetinaNet)
             else:

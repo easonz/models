@@ -8,7 +8,8 @@ import cv2
 from scipy import ndimage
 import mindspore.dataset
 from models.classes import get_classes
-from dataloader.multi_scale_flip_aug import MultiScaleFlipAug, ResizeOperation, RandomFlipOperation, Normalize, Pad, ImageToTensor
+from dataloader.multi_scale_flip_aug import *
+from dataloader.collate_ms import collate
 from models.solov2 import SOLOv2
 from dataloader.cocodataset import CocoDataset
 import logging
@@ -128,26 +129,49 @@ def show_result_ins(img,
     else:
         mmcv.imwrite(img_show, out_file)
 
+def build_dataset(cfg, cfg_data):
+    ann_file = cfg['ann_file']
+    img_prefix = cfg['img_prefix']
 
-def build_val_dataset(data_root):
-    ann_file = os.path.join(data_root, "annotations/instances_val2017.json")
-    img_prefix = os.path.join(data_root, "val2017")
-    print(f"ann_file:{ann_file}, data_root:{data_root}, img_prefix:{img_prefix}")
+    is_training = False
+    logging.info(f"ann_file {ann_file}")
+    cocodataset = CocoDataset(ann_file=ann_file, data_root=None, img_prefix=img_prefix, test_mode=True)
+    dataset_column_names = ['res']
+    import mindspore.dataset as de
+    ds = de.GeneratorDataset(cocodataset, column_names=dataset_column_names,
+                        num_shards=None, shard_id=None,
+                        num_parallel_workers=4, shuffle=is_training, num_samples=None)
+    test_ops = []
+    # breakpoint()
+    for ops in cfg['pipeline']:
+        if ops['type'] == 'MultiScaleFlipAug':
+            test_ops.append(
+            MultiScaleFlipAug(transforms=[ResizeOperation(keep_ratio=True), 
+            RandomFlipOperation(), 
+            Normalize(mean=[123.675, 116.28, 103.53], 
+            std=[58.395, 57.12, 57.375], 
+            to_rgb=True),
+            Pad(size_divisor=32), 
+            ImageToTensor(keys=['img']),
+            Collect(keys=['img'])], 
+            img_scale=(1333, 800),
+            flip=False))
 
-    coco_dataset = CocoDataset(ann_file=ann_file, data_root=data_root, img_prefix=img_prefix, test_mode=True)
-    # dataset_column_names = ['res']
-    # ds = mindspore.dataset.GeneratorDataset(cocodataset, column_names=dataset_column_names,
-    #                         num_shards=None, shard_id=None,
-    #                         num_parallel_workers=1, shuffle=False, num_samples=None)
-
-    return coco_dataset
+    dataset_train = ds.map(
+        operations=test_ops, 
+        input_columns=['res'], 
+        output_columns=['res'],
+    )
+    dataset_train = dataset_train.batch(cfg_data["imgs_per_gpu"], per_batch_map=collate)
+    data_iter = dataset_train.create_dict_iterator()
+    return dataset_train
 
 def parse_args():
     parser = argparse.ArgumentParser(description='MMDet test detector')
-    parser.add_argument('config', help='test config file path')
-    parser.add_argument('checkpoint', help='checkpoint file')
-    parser.add_argument('dataroot', help='coco data root')
-    parser.add_argument('--out', help='output result file')
+    parser.add_argument('--config', help='test config file path', required=True)
+    parser.add_argument('--checkpoint', help='checkpoint file', required=True)
+    parser.add_argument('--out', help='output result file', default='results_solo.pkl')
+    parser.add_argument('--resume', help='when core store, resume from last record', default=0)
     parser.add_argument(
         '--json_out',
         help='output result file name without extension',
@@ -166,6 +190,8 @@ def parse_args():
         default='none',
         help='job launcher')
     parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument('--mode', type=int, default=1)
+    parser.add_argument('--deviceid', type=int, default=0)
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
@@ -174,7 +200,7 @@ def parse_args():
 def get_masks(result, num_classes=80):
     for cur_result in result:
         masks = [[] for _ in range(num_classes)]
-        if cur_result is None:
+        if cur_result[0].shape == (1,):
             return masks
         seg_pred = cur_result[0].numpy().astype(np.uint8)
         cate_label = cur_result[1].numpy().astype(np.int32)
@@ -211,54 +237,100 @@ def segm2json_segm(coco, results):
 #python val.py /mnt/denglian/SOLO/configs/solov2/solov2_r101_dcn_fpn_8gpu_3x.py ./SOLOv2_R101_DCN_3x-fpn.ckpt /mnt/denglian/coco --show --out  results_solo.pkl --eval segm
 def main():
     logging.basicConfig(stream=sys.stdout, level=logging.INFO, format='[%(asctime)s.%(msecs)03d] [%(levelname)s] [%(process)d] [%(thread)d] [%(filename)s:%(lineno)d] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-
-    # build the model from a config file and a checkpoint file
-    arg = parse_args()
-
-    config = mmcv.Config.fromfile(arg.config)
+    args = parse_args()
+    
+    logging.info(f"run at device {args.deviceid}, mode:{args.mode}")
+    ms.set_context(device_target='Ascend', device_id=args.deviceid, mode=args.mode, jit_syntax_level=mindspore.STRICT)
+    
+    logging.info(f"load config {args.config}")
+    config = mmcv.Config.fromfile(args.config)
     config.model.pretrained = None
 
     logging.debug("build model start")
     model = build_from_cfg_ms(config.model, default_args=dict(train_cfg=None, test_cfg=config.test_cfg))
+    seg = model.bbox_head
     logging.debug("build model success")
 
     model.CLASSES = get_classes('coco')
     model.cfg = config
     num_classes = len(model.CLASSES)
 
-    logging.debug("load checkpoint start")
-    checkpoint = ms.load_checkpoint(arg.checkpoint, model)
+    logging.debug("load checkpoint start, {args.checkpoint}")
+    checkpoint = ms.load_checkpoint(args.checkpoint, model)
     logging.debug("load checkpoint success")
     
     logging.debug("build val dataset start")
-    dataset_val = build_val_dataset(arg.dataroot)
+    dataset_test = build_dataset(config.data.test, config.data)
     logging.debug("build val dataset success")
 
-    #data_iter = dataset_val.create_dict_iterator()
-    multiScaleFlipAug = MultiScaleFlipAug(transforms=[ResizeOperation(keep_ratio=True), RandomFlipOperation(), Normalize(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True),
-    Pad(size_divisor=32), ImageToTensor(keys=['img'])], img_scale=(1333, 800))
-    trans_vals = [multiScaleFlipAug]
+    if args.resume:
+        results = []
+        resume = 0
+        
+        if os.path.exists("valution_results.pkl"):
+            with open("valution_results.pkl", "rb") as fd:
+                logging.info(f"read valution_results.pkl")
+                results = pickle.load(fd)
+                logging.info(f"resume from {len(results)}")
+                resume = len(results)
+        prog_bar = mmcv.ProgressBar(len(dataset_test))
+        for i in range(len(results)):
+            prog_bar.update()
+        
+        try:
+            if args.mode:
+                for i, data in enumerate(dataset_test):
+                    if i < resume:
+                        continue
+                    data = data[0]
+                    img = data['img'][0]
+                    img_meta = data['img_meta'][0].data[0]
+                    seg_result = model(img, img_meta, return_loss=False, rescale=True)
+                    result = get_masks(seg_result, num_classes=num_classes)
+                    results.append(result)
+                    prog_bar.update()
+        except:
+            with open("valution_results.pkl", "wb") as fd:
+                logging.info(f"write valution_results.pkl, results:{len(results)}")
+                pickle.dump(results, fd)
+            return
+    else:
+        results = []
+        prog_bar = mmcv.ProgressBar(len(dataset_test))
+        if args.mode:
+            for i, data in enumerate(dataset_test):
+                data = data[0]
+                img = data['img'][0]
+                img_meta = data['img_meta'][0].data[0]
+                seg_result = model(img, img_meta, return_loss=False, rescale=True)
+                result = get_masks(seg_result, num_classes=num_classes)
+                results.append(result)
+                prog_bar.update()
+        else:
+            for i, data in enumerate(dataset_test):
+                data = data[0]
+                img = data['img'][0]
+                img_meta = data['img_meta'][0].data[0]
+                outputs = model(img, img_meta, return_loss=False)
+                output_numpys = []
+                for i in range(len(outputs)):
+                    output_data = outputs[i]
+                    output_numpys.append(output_data)
 
-    results = []
-    for i, data in enumerate(dataset_val):
-        logging.info(f"data:{data}")
-        for trans_val in trans_vals:
-            data = trans_val(data)
-
-        img = ms.ops.unsqueeze(data["img"][0], dim=0)
-        logging.debug(img)
-        img_meta = []
-        img_meta.append(data)
-    
-        logging.debug(f'model forward start, img.type:{type(img)}, img:{img}, img_meta:{img_meta}')
-        seg_result = model.simple_test(img, img_meta)
-        logging.debug(f"model forward end, seg_result.type:{type(seg_result)}, {seg_result}")
-
-        result = get_masks(seg_result, num_classes=num_classes)
-        results.append(result)
+                cate_preds = []
+                for i in range(5):
+                    cate_preds.append([ms.Tensor(output_numpys[i])])
+                kernel_preds = []
+                for i in range(5):
+                    kernel_preds.append(ms.Tensor(output_numpys[5 + i]))
+                seg_pred = ms.Tensor(output_numpys[10])
+                seg_result = seg.get_seg(cate_preds= cate_preds, kernel_preds=kernel_preds, seg_pred=seg_pred, img_metas=img_meta, cfg=model.test_cfg, rescale=False)
+                result = get_masks(seg_result, num_classes=num_classes)
+                results.append(result)
+                prog_bar.update()
 
 
-    annotation_file = os.path.join(arg.dataroot, "annotations/instances_val2017.json")
+    annotation_file = os.path.join(config.data_root, "annotations/instances_val2017.json")
     gt = COCO(annotation_file)
     dt_json = segm2json_segm(gt, results)
     coco_dets = gt.loadRes(dt_json)

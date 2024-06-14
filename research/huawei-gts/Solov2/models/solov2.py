@@ -1,15 +1,13 @@
 import logging
-
 from mindspore import nn
 import mindspore as ms
-from .BaseDetector import BaseDetector
 from .FPN_MindSpore import FPN_MindSpore
 from .ResNet import ResNet
 from .MaskFeatHead_ms import MaskFeatHead_ms
 from .SOLOv2Head_ms import SOLOv2Head_ms
 
 
-class SOLOv2(BaseDetector):
+class SOLOv2(ms.nn.Cell):
 
     def __init__(self,
                  backbone,
@@ -35,8 +33,10 @@ class SOLOv2(BaseDetector):
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
 
+        self.init_weights(pretrained=pretrained)
+
+
     def init_weights(self, pretrained=None):
-        super(SOLOv2, self).init_weights(pretrained)
         self.backbone.init_weights(pretrained=pretrained)
         if self.with_neck:
             if isinstance(self.neck, nn.SequentialCell):
@@ -63,47 +63,92 @@ class SOLOv2(BaseDetector):
         outs = self.bbox_head(x)
         return outs
 
-    def forward_train(self,
+    def construct(self, img, img_meta, return_loss=True, **kwargs):
+        if return_loss:
+            return self.construct_train(img, img_meta, **kwargs)
+        else:
+            return self.construct_test(img, img_meta, **kwargs)
+        
+    def construct_train(self,
                       img,
-                      img_metas,
+                      img_meta,
                       gt_bboxes,
                       gt_labels,
-                      gt_bboxes_ignore=None,
+                    #   gt_bboxes_ignore=None,
                       gt_masks=None):
+        logging.debug(f"construct_train img:{img}, img_meta:{img_meta}, gt_bboxes:{gt_bboxes}, gt_labels:{gt_labels}")
         
-        input_tensor = img.data
-        if len(img.data.shape) == 3:
-            input_tensor = ms.ops.unsqueeze(input_tensor,dim=0)
-        x = self.extract_feat(input_tensor)
-        
+        x = self.extract_feat(img)
+
         outs = self.bbox_head(x)
-        
+
         if self.with_mask_feat_head:
             mask_feat_pred = self.mask_feat_head(x[self.mask_feat_head.start_level:self.mask_feat_head.end_level + 1])
-            loss_inputs = outs + (mask_feat_pred, gt_bboxes, gt_labels, gt_masks, img_metas, self.train_cfg)
+            loss_inputs = outs + (mask_feat_pred, gt_bboxes, gt_labels, gt_masks, img_meta, self.train_cfg)
         else:
-            loss_inputs = outs + (gt_bboxes, gt_labels, gt_masks, img_metas, self.train_cfg)
+            loss_inputs = outs + (gt_bboxes, gt_labels, gt_masks, img_meta, self.train_cfg)
+        # import pdb;pdb.set_trace()
         losses = self.bbox_head.loss(
-            *loss_inputs, gt_bboxes_ignore=gt_bboxes_ignore)
+            *loss_inputs, gt_bboxes_ignore=None)
         return losses
 
-    def simple_test(self, img, img_meta, rescale=False):
+    def construct_test(self, img, img_meta, rescale=False):
+        logging.debug(f"construct_test img:{img}, img_meta:{img_meta}, rescale:{rescale}")
         x = self.extract_feat(img)
-        logging.info("start bbox_head")
+    
         outs = self.bbox_head(x, eval=True)
-        logging.info("bbox_head succeed")
-
+        
+        seg_inputs = []
+        for i in range(len(outs)):
+            seg_inputs.extend(outs[i])
+       
         if self.with_mask_feat_head:
-            logging.info("strat mask_feat_head")
+            
             mask_feat_pred = self.mask_feat_head(
                 x[self.mask_feat_head.
                   start_level:self.mask_feat_head.end_level + 1])
             seg_inputs = outs + (mask_feat_pred, img_meta, self.test_cfg, rescale)
-            logging.info("mask_feat_head succeed")
+
         else:
             seg_inputs = outs + (img_meta, self.test_cfg, rescale)
         seg_result = self.bbox_head.get_seg(*seg_inputs)
         return seg_result  
+    
+    @property
+    def with_neck(self):
+        return hasattr(self, 'neck') and self.neck is not None
+
+    @property
+    def with_mask_feat_head(self):
+        return hasattr(self, 'mask_feat_head') and \
+            self.mask_feat_head is not None
+
+    @property
+    def with_shared_head(self):
+        return hasattr(self, 'shared_head') and self.shared_head is not None
+
+    @property
+    def with_bbox(self):
+        return hasattr(self, 'bbox_head') and self.bbox_head is not None
+
+    @property
+    def with_mask(self):
+        return hasattr(self, 'mask_head') and self.mask_head is not None
+###
+    def simple_test(self, img, img_meta, rescale=False):
+        x = self.extract_feat(img)
+
+        outs = self.bbox_head(x, eval=True)
+
+        if self.with_mask_feat_head:
+            mask_feat_pred = self.mask_feat_head(
+                x[self.mask_feat_head.
+                  start_level:self.mask_feat_head.end_level + 1])
+            seg_inputs = outs + (mask_feat_pred, img_meta, self.test_cfg, rescale)
+        else:
+            seg_inputs = outs + (img_meta, self.test_cfg, rescale)
+        seg_result = self.bbox_head.get_seg(*seg_inputs)
+        return seg_result
 
     def aug_test(self, imgs, img_metas, rescale=False):
         raise NotImplementedError

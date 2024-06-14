@@ -7,7 +7,7 @@ from mindspore.dataset import ImageFolderDataset
 from .mmcv_utils import *
 from . import mmcv_utils
 from .data_container import DataContainer as DC
-
+import logging
 class ResizeOperation(object):
     """Resize images & bbox & mask.
 
@@ -45,7 +45,6 @@ class ResizeOperation(object):
                 self.img_scale = img_scale
             else:
                 self.img_scale = [img_scale]
-            # assert isinstance(self.img_scale, tuple)
             assert mmcv_utils.is_list_of(self.img_scale, tuple)
 
         if ratio_range is not None:
@@ -61,11 +60,11 @@ class ResizeOperation(object):
 
     @staticmethod
     def random_select(img_scales):
-        np.random.seed(1)
-        # assert isinstance(img_scales, tuple)
+
         assert mmcv_utils.is_list_of(img_scales, tuple)
         scale_idx = np.random.randint(len(img_scales))
         img_scale = img_scales[scale_idx]
+
         return img_scale, scale_idx
 
     @staticmethod
@@ -109,12 +108,9 @@ class ResizeOperation(object):
         results['scale_idx'] = scale_idx
 
     def _resize_img(self, results):
-        # logging.info(f'_resize_img input:{results}\n scale {results["scale"]}, scale index {results["scale_idx"]}')
         if self.keep_ratio:
-            # logging.info(results)
             img, scale_factor = mmcv_utils.imrescale(
                 results['img'], results['scale'], return_scale=True)
-            # logging.info(f'resize_img:{img}, scale_factor:{scale_factor}')
         else:
             img, w_scale, h_scale = mmcv_utils.imresize(
                 results['img'], results['scale'], return_scale=True)
@@ -162,15 +158,13 @@ class ResizeOperation(object):
                     results[key], results['scale'], interpolation='nearest')
             results['gt_semantic_seg'] = gt_seg
 
-    def __call__(self, results): #todo：入参的时候numpy, 在163拼起来成为dict
-        # logging.info(f"Resize start:{results}")
+    def __call__(self, results):
         if 'scale' not in results:
             self._random_scale(results)
         self._resize_img(results)
         self._resize_bboxes(results)
         self._resize_masks(results)
         self._resize_seg(results)
-        # logging.info(f"Resize end:{results}")
         return results
 
     def __repr__(self):
@@ -250,8 +244,7 @@ class RandomFlipOperation(object):
             for key in results.get('seg_fields', []):
                 results[key] = mmcv_utils.imflip(
                     results[key], direction=results['flip_direction'])
-        # logging.info(f'RandomFlip end:{results}')
-        # logging.debug(results)
+
         return results
 
     def __repr__(self):
@@ -380,7 +373,7 @@ class ImageToTensor(object):
             img = results[key]
             if len(img.shape) < 3:
                 img = np.expand_dims(img, -1)
-            results[key] = to_tensor(img.transpose(2, 0, 1))
+            results[key] = img.transpose(2, 0, 1)
         return results
 
     def __repr__(self):
@@ -438,7 +431,7 @@ class DefaultFormatBundle(object):
     - gt_semantic_seg: (1)unsqueeze dim-0 (2)to tensor,
                        (3)to DataContainer (stack=True)
     """
-
+    #breakpoint()
     def __call__(self, results):
         # logging.info(f"DefaultFormat start:{results}")
         if 'img' in results:
@@ -446,16 +439,16 @@ class DefaultFormatBundle(object):
             if len(img.shape) < 3:
                 img = np.expand_dims(img, -1)
             img = np.ascontiguousarray(img.transpose(2, 0, 1))
-            results['img'] = DC(to_tensor(img), stack=True)
+            results['img'] = DC(img, stack=True)
         for key in ['proposals', 'gt_bboxes', 'gt_bboxes_ignore', 'gt_labels']:
             if key not in results:
                 continue
-            results[key] = DC(to_tensor(results[key]))
+            results[key] = DC(results[key])
         if 'gt_masks' in results:
             results['gt_masks'] = DC(results['gt_masks'], cpu_only=True)
         if 'gt_semantic_seg' in results:
             results['gt_semantic_seg'] = DC(
-                to_tensor(results['gt_semantic_seg'][None, ...]), stack=True)
+                results['gt_semantic_seg'][None, ...], stack=True)
         # logging.info(f"DefaultFormat end:{results}")
         return results
 
@@ -526,18 +519,10 @@ def main():
     multiScaleFlipAug = MultiScaleFlipAug(transforms=[ResizeOperation(keep_ratio=True), RandomFlipOperation(), Normalize(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True),
         Pad(size_divisor=32), ImageToTensor(keys=['img'])], img_scale=(1333, 800))
     trans_vals = [multiScaleFlipAug]
-    
-    # results = {"img": "/mnt/denglian/coco/test2017/000000000001.jpg"}
-    # for trans_val in trans_vals:
-    #     results = trans_val(results)
-    # print(results)
 
     dataset_val = ImageFolderDataset(dataset_dir="/mnt/denglian/coco/test_one/", decode=False)
     data_size = dataset_val.get_dataset_size()
     logging.info(f"data_size:{data_size}")
-    # data_iter = dataset_val.create_dict_iterator()
-    # for data in data_iter:
-    #     logging.info(data)
     
         
     dataset_val = dataset_val.map(operations=trans_vals, input_columns=["image"])
@@ -545,6 +530,7 @@ def main():
     data_iter = dataset_val.create_dict_iterator()
     for data in data_iter:
         logging.info(f'data:{data}')
+
 
 if __name__ == "__main__":
     main()

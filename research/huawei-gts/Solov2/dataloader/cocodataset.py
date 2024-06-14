@@ -1,13 +1,10 @@
 import numpy as np
 from pycocotools.coco import COCO
 import os.path as osp
-import pycocotools.mask as maskUtils
-from functools import partial
-from .collate_ms import collate
 from .multi_scale_flip_aug import DefaultFormatBundle, Collect
-import sys
 from . import loading
-# logging.basicConfig(stream=sys.stdout, level=logging.INFO, format='[%(asctime)s.%(msecs)03d] [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+
 
 
 class CocoDataset():
@@ -32,20 +29,46 @@ class CocoDataset():
     The `ann` field is optional for testing.
     """
 
-    CLASSES = ('person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
-               'train', 'truck', 'boat', 'traffic_light', 'fire_hydrant',
-               'stop_sign', 'parking_meter', 'bench', 'bird', 'cat', 'dog',
-               'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe',
-               'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
-               'skis', 'snowboard', 'sports_ball', 'kite', 'baseball_bat',
-               'baseball_glove', 'skateboard', 'surfboard', 'tennis_racket',
-               'bottle', 'wine_glass', 'cup', 'fork', 'knife', 'spoon', 'bowl',
-               'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot',
-               'hot_dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
-               'potted_plant', 'bed', 'dining_table', 'toilet', 'tv', 'laptop',
-               'mouse', 'remote', 'keyboard', 'cell_phone', 'microwave',
-               'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock',
-               'vase', 'scissors', 'teddy_bear', 'hair_drier', 'toothbrush')
+    # CLASSES = ('person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
+    #            'train', 'truck', 'boat', 'traffic_light', 'fire_hydrant',
+    #            'stop_sign', 'parking_meter', 'bench', 'bird', 'cat', 'dog',
+    #            'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe',
+    #            'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
+    #            'skis', 'snowboard', 'sports_ball', 'kite', 'baseball_bat',
+    #            'baseball_glove', 'skateboard', 'surfboard', 'tennis_racket',
+    #            'bottle', 'wine_glass', 'cup', 'fork', 'knife', 'spoon', 'bowl',
+    #            'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot',
+    #            'hot_dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
+    #            'potted_plant', 'bed', 'dining_table', 'toilet', 'tv', 'laptop',
+    #            'mouse', 'remote', 'keyboard', 'cell_phone', 'microwave',
+    #            'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock',
+    #            'vase', 'scissors', 'teddy_bear', 'hair_drier', 'toothbrush')
+    
+    tmp_category_ids = {
+    'rov':                      1,
+    'plant':                    2,
+    'animal_fish':              3,
+    'animal_starfish':          4,
+    'animal_shells':            5,
+    'animal_crab':              6,
+    'animal_eel':               7,
+    'animal_etc':               8,
+    'trash_clothing':           9,
+    'trash_pipe':               10,
+    'trash_bottle':             11,
+    'trash_bag':                12,
+    'trash_snack_wrapper':      13,
+    'trash_can':                14,
+    'trash_cup':                15,
+    'trash_container':          16,
+    'trash_unknown_instance':   17,
+    'trash_branch':             18,
+    'trash_wreckage':           19,
+    'trash_tarp':               20,
+    'trash_rope':               21,
+    'trash_net':                22
+    }
+    CLASSES = tuple(tmp_category_ids.keys())
 
     def __init__(self,
                  ann_file,
@@ -212,15 +235,8 @@ class CocoDataset():
         while True:
             data = self.prepare_train_img(idx)
             if data is None or 'gt_bboxes' not in data or 'gt_masks' not in data :
-                logging.info(f'random because: gt_bboxes->{"gt_bboxes" not in data}  gt_masks->{"gt_mask" not in data}')
                 idx = self._rand_another(idx)
                 continue
-            # dump_tensor(data['img'], r'/mnt/zjy/cocdataset_compare/ms_img.tensor')
-            # dump_tensor(data['gt_bboxes'], r'/mnt/zjy/cocdataset_compare/ms_gt_bboxes.tensor')
-            # dump_tensor(data['gt_labels'], r'/mnt/zjy/cocdataset_compare/ms_gt_labels.tensor')
-            # import mindspore
-            # dump_tensor(mindspore.Tensor(data['gt_masks']), r'/mnt/zjy/cocdataset_compare/ms_gt_mask.tensor')
-            
             return data
 
 
@@ -254,78 +270,3 @@ class CocoDataset():
         self.pre_pipeline(results)
         self.load_files(results)
         return results
-
-
-def test_train():
-    # import sys
-    # sys.path.append('/mnt/denglian/its')
-    # import its_utils
-    import mindspore.dataset as de
-    import os
-    import pickle
-    data_root = '/mnt/denglian/coco/'
-    ann_file = data_root + 'annotations/instances_val2017_two.json'
-    img_prefix=data_root + 'val2017/'
-
-    is_training = True
-    cocodataset = CocoDataset(ann_file=ann_file, data_root=data_root, img_prefix=img_prefix, test_mode=False)
-    dataset_column_names = ['res']
-    ds = de.GeneratorDataset(cocodataset, column_names=dataset_column_names,
-                            num_shards=None, shard_id=None,
-                            num_parallel_workers=1, shuffle=is_training, num_samples=None)
-
-    resize_ops = ResizeOperation([(1333, 800), (1333, 768), (1333, 736),
-                    (1333, 704), (1333, 672), (1333, 640)], multiscale_mode='value', keep_ratio=True)
-    randomflip_ops = RandomFlipOperation(flip_ratio=0.5)
-    normal_ops = Normalize(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
-    pad_ops = Pad(size_divisor=32)
-    defaultformatbundle_ops = DefaultFormatBundle()
-    collect_ops = Collect(keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks'])
-    train_ops = [resize_ops, randomflip_ops, normal_ops, pad_ops, defaultformatbundle_ops, collect_ops]
-
-    dataset_train = ds.map(operations=train_ops, input_columns=['res'], output_columns=['res'])
-    # dataset_train = dataset_train.batch(2, per_batch_map=collate)
-    dataset_train = dataset_train.batch(2, per_batch_map=partial(collate, samples_per_gpu=1))
-    data_iter = dataset_train.create_dict_iterator()
-    for iter, item in enumerate(data_iter):
-        logging.info(f'iter {iter} {item}')
-        logging.info(f'img_meta {item["res"]["img_meta"].data}')
-        logging.info(f'img {item["res"]["img"].data}')
-        logging.info(f'gt_bboxes {item["res"]["gt_bboxes"].data}')
-        logging.info(f'gt_labels {item["res"]["gt_labels"].data}')
-        logging.info(f'gt_masks {item["res"]["gt_masks"].data}')
-
-
-def test_val():
-    # import sys
-    # sys.path.append('/mnt/denglian/its')
-    # import its_utils
-    import mindspore.dataset as de
-    import os
-    data_root = r'/mnt/denglian/coco/'
-    # data_root = '/home/zhangchenxi/tmp/SOLO/data/coco/'
-    ann_file = data_root + 'annotations/instances_val2017.json'
-    img_prefix=data_root + 'val2017/'
-    is_training = False
-    cocodataset = CocoDataset(ann_file=ann_file, data_root=data_root, img_prefix=img_prefix, test_mode=True)
-    dataset_column_names = ['res']
-    ds = de.GeneratorDataset(cocodataset, column_names=dataset_column_names,
-                            num_shards=None, shard_id=None,
-                            num_parallel_workers=1, shuffle=is_training, num_samples=None)
-
-    multiScaleFlipAug = MultiScaleFlipAugOrigin(transforms=[ResizeOperation(keep_ratio=True), RandomFlipOperation(), Normalize(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True),
-    Pad(size_divisor=32), ImageToTensor(keys=['img']),Collect(keys=['img'])], img_scale=(1333, 800))
-    trans_vals = [multiScaleFlipAug]
-    dataset_train = ds.map(operations=trans_vals, input_columns =['res'], output_columns=['res'])
-    dataset_train = dataset_train.batch(2, per_batch_map=partial(collate, samples_per_gpu=1))
-    data_iter = dataset_train.create_dict_iterator()
-    for iter, item in enumerate(data_iter):
-        logging.info(f'iter {iter} {item}')
-        logging.info(f'img_meta {item["res"]["img_meta"]}')
-        logging.info(f'img {item["res"]["img"]}')
-
-
-if __name__ == '__main__':
-    from multi_scale_flip_aug import *
-    test_train()
-    test_val()

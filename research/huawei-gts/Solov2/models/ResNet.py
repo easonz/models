@@ -1,6 +1,7 @@
 import mindspore as ms
 import logging
 from .conv_model import build_norm_layer, build_conv_layer
+from .weight_init_utils import *
 
 
 global_bottleneck_id = 0
@@ -301,6 +302,9 @@ class ResNet(ms.nn.Cell):
         self.frozen_stages = frozen_stages
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
+
+        # self.norm_cfg['use_batch_statistics'] = False
+
         self.with_cp = with_cp
         self.norm_eval = norm_eval
         self.dcn = dcn
@@ -318,7 +322,7 @@ class ResNet(ms.nn.Cell):
         self.inplanes = 64
 
         self._make_stem_layer(in_channels)
-
+        # self.norm_cfg['use_batch_statistics'] = False
         self.res_layers = []
         for i, num_blocks in enumerate(self.stage_blocks):
             stride = strides[i]
@@ -351,6 +355,32 @@ class ResNet(ms.nn.Cell):
         self.feat_dim = self.block.expansion * 64 * 2**(
             len(self.stage_blocks) - 1)
 
+    def init_weights(self, pretrained=None):
+        if isinstance(pretrained, str):
+            # logger = get_root_logger()
+            ms.load_checkpoint(pretrained, self)
+            # load_checkpoint(self, pretrained, strict=False, logger=logger)
+
+        elif pretrained is None:
+            for m in self.cells():
+                if isinstance(m, ms.nn.Conv2d):
+                    kaiming_init(m)
+                elif isinstance(m, ms.nn.GroupNorm):
+                    constant_init(m, 1)
+
+            if self.dcn is not None:
+                for m in self.cells():
+                    if isinstance(m, Bottleneck) and hasattr(
+                            m, 'conv2_offset'):
+                        constant_init(m.conv2_offset, 0)
+
+            if self.zero_init_residual:
+                for m in self.cells():
+                    if isinstance(m, Bottleneck):
+                        constant_init(m.norm3, 0)
+        else:
+            raise TypeError('pretrained must be a str or None')
+
     @property
     def norm1(self):
         return getattr(self, self.norm1_name)
@@ -374,6 +404,7 @@ class ResNet(ms.nn.Cell):
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
             self.norm1.set_train(False)
+            # self.norm1.use_batch_statistics = False
             for m in [self.conv1, self.norm1]:
                 for param in m.get_parameters():
                     param.requires_grad = False
@@ -387,14 +418,40 @@ class ResNet(ms.nn.Cell):
 
     def construct(self, x):
         ori_type = x.dtype
+        # x = x.astype(ms.float16)
         x = self.conv1(x)
+        # x = x.astype(ori_type)
+
         x = self.norm1(x)
         x = self.relu(x)
+
         x = self.maxpool(x)
+
+        
         outs = []
         for i, layer_name in enumerate(self.res_layers):
             res_layer = getattr(self, layer_name)
+            # x = x.astype(ms.float16)
             x = res_layer(x)
+            # x = x.astype(ori_type)
             if i in self.out_indices:
                 outs.append(x)
         return tuple(outs)
+
+    def set_train(self, mode=True):
+        super(ResNet, self).set_train(mode)
+        self._freeze_stages()
+        if mode and self.norm_eval:
+            recursive_freeze_bn(self)
+
+
+def recursive_freeze_bn(net):
+    # pylint: disable=W0212
+    for name, cell in net._cells.items():
+        if cell:
+            # add white list spaces.
+            if isinstance(cell, ms.nn.layer.normalization.BatchNorm2d):
+                cell.set_train(False)
+            else:
+                recursive_freeze_bn(cell)
+    return

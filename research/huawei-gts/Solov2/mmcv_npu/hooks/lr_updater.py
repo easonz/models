@@ -1,6 +1,7 @@
 from math import cos, pi
 import mindspore.ops as ops
 from .hook import Hook
+import copy
 
 class LrUpdaterHook(Hook):
 
@@ -31,9 +32,6 @@ class LrUpdaterHook(Hook):
         self.regular_lr = []  # expected lr if no warming up is performed
 
     def _set_lr(self, runner, lr_groups):
-        #z30055003 lr_updater迁移
-        # for param_group, lr in zip(runner.optimizer.group_params, lr_groups):
-        #     param_group['lr'] = lr
         for param_group, lr in zip(runner.optimizer.param_groups, lr_groups):
             ops.assign(param_group['lr'],lr)
             
@@ -56,19 +54,11 @@ class LrUpdaterHook(Hook):
         return warmup_lr
 
     def before_run(self, runner):
-        # NOTE: when resuming from a checkpoint, if 'initial_lr' is not saved,
-        # it will be set according to the optimizer params
-        # for group in runner.optimizer.group_params:
-        #     group['initial_lr'] = group['lr']
-        # self.base_lr = [
-        #     group['initial_lr'] for group in runner.optimizer.group_params
-        # ]
         for group in runner.optimizer.param_groups:
             group['initial_lr'] = group['lr']
-        self.base_lr = [
+        self.base_lr = copy.deepcopy([
             group['initial_lr'] for group in runner.optimizer.param_groups
-        ]
-            
+        ])
 
     def before_train_epoch(self, runner):
         if not self.by_epoch:
