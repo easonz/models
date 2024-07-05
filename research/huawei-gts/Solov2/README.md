@@ -283,6 +283,28 @@ RANK_TABLE_FILE 单机8卡参考样例:
 - 执行分布式微调命令
 
 ```
-bash run_singlenode.sh "python train.py --config configs/solov2/solov2_r101_fpn_8gpu_3x.py" /path/to/RANK_TABLE_FILE.json [0,8] 8
+bash msrun_launcher.sh "train.py --config configs/solov2/solov2_r101_fpn_8gpu_3x.py" 8 8 127.0.0.1 9543 0 output/msrun_log False 3000
 ```
 
+#### 断点续训
+正常场景下，我们可以在SoloV2根目录使用如下命令，从零开始进行训练
+```shell
+bash msrun_launcher.sh train_multi.py 8 8 127.0.0.1 9543 0 output/msrun_log False 3000
+```
+
+如果遇到异常场景导致的中断，我们会在每个epoch训练完成后，保存对应的ckpt，并且我们可以通过如下命令直接进行断点续训
+```shell
+bash msrun_launcher.sh train_multi_by_snap_ckpt.py 8 8 127.0.0.1 9543 0 output/msrun_log False 3000
+```
+
+##### 参数讲解
+- msrun_launcher.sh: 要执行的shell脚本文件，在SoloV2的根目录
+- train_by_snap_ckpt_multi.py: 训练任务的Python脚本，它将被msrun_launcher.sh脚本调用
+- 8: 本次训练需要用到的卡的总数
+- 8: 本次训练单个机器需要用到的卡数
+- 127.0.0.1: 本机地址，在多机器训练场景中，这个IP需要修改为机器0对应的IP
+- 9543: 机器间用于互相通信的端口
+- 0: 当前机器的ID，0一般代表主节点
+- output/msrun_log: 日志输出目录，训练过程中的日志将被保存在这个路径下
+- False: 固定参数
+- 3000: 多机训练时，机器之间验证心跳的间隔

@@ -32,11 +32,13 @@ class Runner(nn.TrainOneStepWithLossScaleCell):
                  model,
                  optimizer=None,
                  batch_processor=None,
-                 work_dir=None
+                 work_dir=None,
+                 epoch=0,
+                 iter=0
                  ):
         super().__init__(model, optimizer, ms.Tensor(1.0))
         # assert callable(batch_processor)
-        
+
         # if optimizer is not None:
         #     self.optimizer = self.init_optimizer(optimizer)
         # else:
@@ -45,8 +47,8 @@ class Runner(nn.TrainOneStepWithLossScaleCell):
         self.optimizer = optimizer
         self.batch_processor = batch_processor
         self._hooks = []
-        self._epoch = 0
-        self._iter = 0
+        self._epoch = epoch
+        self._iter = iter
         self._inner_iter = 0
         self._max_epochs = 0
         self._max_iters = 0
@@ -195,7 +197,7 @@ class Runner(nn.TrainOneStepWithLossScaleCell):
         self.call_hook('before_train_epoch')
         size = len(dataset)
         for batch,data in enumerate(dataset):
-            
+
             self.call_hook('before_train_iter')
 
             import time
@@ -221,30 +223,32 @@ class Runner(nn.TrainOneStepWithLossScaleCell):
             endtime = time.time()
             if batch % 1 == 0:
                 loss, current = loss.asnumpy(), self._iter
-                print(f"epoch[{current//size}][{current%size}/{size:>3d}] loss: {loss:>7f} lr: {self.optimizer.lrs[0].value().asnumpy():>7f} [{current:>3d}/{size:>3d}], steptime: {endtime-begintime}")
+                # print(f"epoch[{current//size}][{current%size}/{size:>3d}] loss: {loss:>7f} lr: {self.optimizer.lrs[0].value().asnumpy():>7f} [{current:>3d}/{size:>3d}], steptime: {endtime-begintime}")
+                print(f"epoch[{self.epoch}/{self.max_epochs-1}], batch[{current%size}/{size-1}], tBatch[{current}], loss: {loss:>7f} lr: {self.optimizer.lrs[0].value().asnumpy():>7f} [{current:>3d}/{size:>3d}], steptime: {endtime-begintime}")
 
-            
+
             self._iter += 1
-            
+
 
         self.call_hook('after_train_epoch')
         self._epoch += 1
 
     def run(self, dataset, workflow, max_epochs, **kwargs):
-        
+
         #todo:workflow
         self._max_epochs = max_epochs
 
         self.call_hook('before_run')
 
         while self.epoch < max_epochs:
+            print(f'===[ReloadCKPT]==== Train at epoch: {self.epoch}, iter: {self.iter}')
             self.train(dataset)
 
         self.call_hook("after_run")
-    
+
     def save_checkpoint(self,
                     out_dir,
-                    filename_tmpl='epoch_{}.ckpt',
+                    filename_tmpl='epoch_{}_iter_{}_snapshot.ckpt',
                     save_optimizer=False,
                     meta=None,
                     create_symlink=True):
@@ -253,10 +257,11 @@ class Runner(nn.TrainOneStepWithLossScaleCell):
         else:
             meta.update(epoch=self.epoch + 1, iter=self.iter)
 
-        filename = filename_tmpl.format(self.epoch + 1)
+        filename = filename_tmpl.format(self.epoch + 1, self.iter)
         filepath = osp.join(out_dir, filename)
         optimizer = self.optimizer if save_optimizer else None
         save_checkpoint(self.model, filepath)
+        print(f'===[ReloadCKPT]==== Save snapshot ckpt: {filepath}')
         # in some environments, `os.symlink` is not supported, you may need to
         # set `create_symlink` to False
         if create_symlink:
@@ -265,4 +270,3 @@ class Runner(nn.TrainOneStepWithLossScaleCell):
             if os.path.lexists(dst):
                 os.remove(dst)
             os.symlink(src, dst)
-    

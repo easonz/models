@@ -76,3 +76,7 @@ cscope.*
 
 # lite opencl compile file
 *.cl.inc
+/research/huawei-gts/CRF/conll2003/metadata
+/research/huawei-gts/CRF/conll2003/test.txt
+/research/huawei-gts/CRF/conll2003/train.txt
+/research/huawei-gts/CRF/conll2003/valid.txt
